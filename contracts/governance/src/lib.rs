@@ -121,6 +121,7 @@ pub struct GovernanceConfig {
     pub voting_period: u64,       // in seconds
     pub voting_delay: u64,        // in seconds
     pub proposal_threshold: i128, // min tokens to propose
+    pub min_quorum: u32,          // minimum absolute votes required
 }
 
 #[contracttype]
@@ -210,6 +211,7 @@ impl GovernorContract {
         voting_period: u64,
         voting_delay: u64,
         proposal_threshold: i128,
+        min_quorum: u32,
     ) {
         if env.storage().instance().has(&DataKey::Config) {
             env.panic_with_error(Error::AlreadyInitialized);
@@ -223,6 +225,7 @@ impl GovernorContract {
             voting_period,
             voting_delay,
             proposal_threshold,
+            min_quorum,
         };
 
         env.storage().instance().set(&DataKey::Config, &config);
@@ -413,6 +416,11 @@ impl GovernorContract {
         }
 
         let config: GovernanceConfig = env.storage().instance().get(&DataKey::Config).unwrap();
+        let total_votes = proposal.for_votes + proposal.against_votes + proposal.abstain_votes;
+        if (total_votes as u32) < config.min_quorum {
+            env.panic_with_error(Error::QuorumNotMet);
+        }
+
         let salt = env
             .crypto()
             .sha256(&proposal.description.clone().to_xdr(&env));
@@ -518,6 +526,10 @@ impl GovernorContract {
             vec![&env],
         );
         let total_votes = proposal.for_votes + proposal.against_votes + proposal.abstain_votes;
+
+        if total_votes < config.min_quorum as i128 {
+            return ProposalState::Defeated;
+        }
 
         if (total_votes * 10000 / total_supply) < config.quorum_bps as i128 {
             return ProposalState::Defeated;

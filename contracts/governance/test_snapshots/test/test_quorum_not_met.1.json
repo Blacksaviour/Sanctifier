@@ -481,6 +481,14 @@
                           "map": [
                             {
                               "key": {
+                                "symbol": "min_quorum"
+                              },
+                              "val": {
+                                "u32": 1000
+                              }
+                            },
+                            {
+                              "key": {
                                 "symbol": "proposal_threshold"
                               },
                               "val": {
@@ -744,6 +752,9 @@
                     "hi": 0,
                     "lo": 500
                   }
+                },
+                {
+                  "u32": 1000
                 }
               ]
             }

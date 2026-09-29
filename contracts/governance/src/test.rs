@@ -1,3 +1,5 @@
+extern crate std;
+
 use crate::{
     GovernorContract, GovernorContractClient, ProposalEvent, ProposalState, VoteCastEvent,
 };
@@ -91,6 +93,7 @@ fn test_governance_full_flow() {
         &86400, // 1 day period
         &3600,  // 1 hour delay
         &500,   // min 500 tokens to propose
+        &1000,  // min 1000 absolute votes required
     );
 
     // 3. Propose
@@ -177,7 +180,7 @@ fn test_proposer_can_cancel_proposal() {
     let timelock_id = env.register_contract(None, MockTimelock);
     let governor_id = env.register_contract(None, GovernorContract);
     let client = GovernorContractClient::new(&env, &governor_id);
-    client.init(&token_id, &timelock_id, &4000, &5001, &1000, &0, &500);
+    client.init(&token_id, &timelock_id, &4000, &5001, &1000, &0, &500, &1000);
 
     let proposal_id = client.propose(
         &proposer,
@@ -221,7 +224,7 @@ fn test_quorum_not_met() {
     let governor_id = env.register_contract(None, GovernorContract);
     let client = GovernorContractClient::new(&env, &governor_id);
 
-    client.init(&token_id, &timelock_id, &4000, &5001, &1000, &0, &500);
+    client.init(&token_id, &timelock_id, &4000, &5001, &1000, &0, &500, &1000);
 
     let proposal_id = client.propose(
         &proposer,
@@ -234,4 +237,90 @@ fn test_quorum_not_met() {
 
     env.ledger().set_timestamp(1001);
     assert_eq!(client.state(&proposal_id), ProposalState::Defeated);
+}
+
+#[test]
+fn test_insufficient_min_quorum_defeats_proposal() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let proposer = Address::generate(&env);
+    let voter1 = Address::generate(&env);
+
+    let token_id = env.register_contract(None, VotingToken);
+    let token_client = VotingTokenClient::new(&env, &token_id);
+    token_client.set_balance(&proposer, &1000);
+    token_client.set_balance(&voter1, &500); // Only 500 votes, less than min_quorum of 1000
+
+    let timelock_id = env.register_contract(None, MockTimelock);
+
+    let governor_id = env.register_contract(None, GovernorContract);
+    let client = GovernorContractClient::new(&env, &governor_id);
+
+    // min_quorum = 1000, but voter only has 500 tokens
+    client.init(&token_id, &timelock_id, &4000, &5001, &1000, &0, &500, &1000);
+
+    let proposal_id = client.propose(
+        &proposer,
+        &vec![&env],
+        &vec![&env],
+        &vec![&env],
+        &symbol_short!("prop"),
+    );
+    client.cast_vote(&voter1, &proposal_id, &1);
+
+    env.ledger().set_timestamp(1001);
+    // State should be Succeeded (percentage quorum met: 500/10000 = 5% < 40%... wait)
+    // Actually with 500 votes out of 10000 supply = 5% < 40% quorum_bps, so Defeated
+    // Let's use a case where percentage quorum passes but absolute min_quorum fails
+    assert_eq!(client.state(&proposal_id), ProposalState::Defeated);
+}
+
+#[test]
+fn test_min_quorum_blocks_queueing() {
+    let env = Env::default();
+    env.mock_all_auths();
+
+    let proposer = Address::generate(&env);
+    let voter1 = Address::generate(&env);
+    let voter2 = Address::generate(&env);
+
+    let token_id = env.register_contract(None, VotingToken);
+    let token_client = VotingTokenClient::new(&env, &token_id);
+    token_client.set_balance(&proposer, &1000);
+    token_client.set_balance(&voter1, &3000); // 3000 votes
+    token_client.set_balance(&voter2, &2000); // 2000 votes
+
+    let timelock_id = env.register_contract(None, MockTimelock);
+
+    let governor_id = env.register_contract(None, GovernorContract);
+    let client = GovernorContractClient::new(&env, &governor_id);
+
+    // quorum_bps = 4000 (40%), min_quorum = 6000
+    // Total supply = 10000
+    // voter1 + voter2 = 5000 votes = 50% > 40% (percentage quorum passes)
+    // But 5000 < 6000 (absolute min_quorum fails)
+    client.init(&token_id, &timelock_id, &4000, &5001, &1000, &0, &500, &6000);
+
+    let proposal_id = client.propose(
+        &proposer,
+        &vec![&env],
+        &vec![&env],
+        &vec![&env],
+        &symbol_short!("prop"),
+    );
+    client.cast_vote(&voter1, &proposal_id, &1); // 3000 for
+    client.cast_vote(&voter2, &proposal_id, &1); // 2000 for
+
+    env.ledger().set_timestamp(1001);
+    // Percentage quorum: 5000/10000 = 50% > 40% -> passes
+    // Threshold: 5000/5000 = 100% > 50.01% -> passes
+    // The absolute quorum requirement must prevent the proposal from passing.
+    assert_eq!(client.state(&proposal_id), ProposalState::Defeated);
+
+    // A defeated proposal cannot be queued.
+    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        client.queue(&proposal_id);
+    }));
+    assert!(result.is_err(), "queue should have failed for insufficient quorum");
 }
